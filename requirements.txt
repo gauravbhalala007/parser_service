@@ -1,0 +1,9 @@
+fastapi
+uvicorn[standard]
+pdfplumber
+pdfminer.six
+pandas
+numpy
+Pillow
+python-multipart
+pydantic
