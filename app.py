@@ -1,6 +1,7 @@
 # app.py
 # Robust FastAPI Parser for Amazon DSP KPI PDFs with ranking & status bucket
 from fastapi import FastAPI, File, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any
 import io, re
@@ -8,6 +9,33 @@ import pdfplumber
 import pandas as pd
 
 app = FastAPI(title="Amazon DSP KPI Parser")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://localhost:4000",
+        "http://127.0.0.1:4000",
+        "http://localhost:5000",
+        "http://127.0.0.1:5000",
+        "http://localhost:8080",
+        "http://127.0.0.1:8080",
+        # you can also temporarily allow all for local:
+        # "*"
+    ],
+    allow_credentials=False,
+    allow_methods=["*"],     # POST included
+    allow_headers=["*"],     # Content-Type, etc.
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # or your exact Hosting origin(s)
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # ===============================
 # MODELS
