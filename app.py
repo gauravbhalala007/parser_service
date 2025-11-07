@@ -148,19 +148,24 @@ def clamp(v: float, lo: float, hi: float) -> float:
 def status_bucket(final_score: Optional[float]) -> str:
     if final_score is None:
         return "Unknown"
-    if final_score >= 85:
-        return "Fantastic"
-    if final_score >= 70:
-        return "Great"
-    if final_score >= 55:
-        return "Fair"
-    return "Poor"
-
+    s = float(final_score)
+    if s >= 93:
+        return "FANTASTIC_PLUS"
+    if s >= 85:
+        return "FANTASTIC"
+    if s >= 70:
+        return "GREAT"
+    if s >= 50:
+        return "FAIR"
+    if s >= 0:
+        return "POOR"
+    # if somehow negative, keep it simple:
+    return "POOR"
 # ===============================
 # KPI FORMULAS (Albert’s rules)
 # ===============================
 def compute_scores(row: Dict[str, Any]) -> Dict[str, Optional[float]]:
-    # Raw
+    # --- parse raw values (unchanged) ---
     pod = to_percent(row.get("POD"))
     cc  = to_percent(row.get("CC"))
     dcr = to_percent(row.get("DCR"))
@@ -169,7 +174,7 @@ def compute_scores(row: Dict[str, Any]) -> Dict[str, Optional[float]]:
     dnr = to_num(row.get("DNR DPMO"))
     cdf = to_num(row.get("CDF DPMO"))
 
-    # Scores
+    # --- per-metric scores (unchanged) ---
     POD_Score = None if pod is None else clamp(pod, 0, 100)
     CC_Score  = None if cc  is None else clamp(cc,  0, 100)
     DCR_Score = None if dcr is None else clamp(dcr, 0, 100)
@@ -178,14 +183,23 @@ def compute_scores(row: Dict[str, Any]) -> Dict[str, Optional[float]]:
     DNR_Score = None if dnr is None else clamp(max(70.0, 100.0 - (dnr / 1200.0) * 30.0), 0, 100)
     CDF_Score = None if cdf is None else clamp(134.33333333333334 - 0.013333333333333334 * cdf, 0.0, 100.0)
 
-
-    valid = [v for v in [POD_Score, CC_Score, DCR_Score, CE_Score, LoR_Score, DNR_Score, CDF_Score] if v is not None]
-    FinalScore = sum(valid) / len(valid) if valid else None
+    # --- Excel-style hard denominator (16.1) ---
+    def z(x): return 0.0 if x is None else x
+    numerator = (
+        z(DCR_Score) +
+        z(POD_Score) +
+        3.0 * z(CC_Score) +
+        5.0 * z(DNR_Score) +
+        5.0 * z(LoR_Score) +
+        (z(CE_Score) / 50.0) +
+        z(CDF_Score)
+    )
+    FinalScore = numerator / 16.1
 
     return {
         "POD_Score": POD_Score, "CC_Score": CC_Score, "DCR_Score": DCR_Score,
         "CE_Score": CE_Score, "LoR_Score": LoR_Score, "DNR_Score": DNR_Score,
-        "CDF_Score": CDF_Score, "FinalScore": FinalScore,
+        "CDF_Score": CDF_Score, "FinalScore": FinalScore
     }
 
 # ===============================
