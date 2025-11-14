@@ -161,10 +161,11 @@ def status_bucket(final_score: Optional[float]) -> str:
         return "POOR"
     # if somehow negative, keep it simple:
     return "POOR"
+
 # ===============================
 # KPI FORMULAS (Albert’s rules)
 # ===============================
-def compute_scores(row: Dict[str, Any]) -> Dict[str, Optional[float]]:
+def compute_scores(row: Dict[str, Any], week_number: Optional[int] = None) -> Dict[str, Optional[float]]:
     # --- parse raw values (unchanged) ---
     pod = to_percent(row.get("POD"))
     cc  = to_percent(row.get("CC"))
@@ -173,33 +174,120 @@ def compute_scores(row: Dict[str, Any]) -> Dict[str, Optional[float]]:
     lor = to_num(row.get("LoR DPMO"))
     dnr = to_num(row.get("DNR DPMO"))
     cdf = to_num(row.get("CDF DPMO"))
+    delivered = to_num(row.get("Delivered"))
+        # Excel-style IF(ISNUMBER(x), x, 0) behaviour
+    ce_val  = 0.0 if ce  is None else ce
+    lor_val = 0.0 if lor is None else lor
+    dnr_val = 0.0 if dnr is None else dnr
+    cdf_val = 0.0 if cdf is None else cdf
 
     # --- per-metric scores (unchanged) ---
     POD_Score = None if pod is None else clamp(pod, 0, 100)
     CC_Score  = None if cc  is None else clamp(cc,  0, 100)
     DCR_Score = None if dcr is None else clamp(dcr, 0, 100)
     CE_Score  = None if ce  is None else clamp(100 - 50.0 * ce, 50, 100)
-    LoR_Score = None if lor is None else clamp(max(70.0, 100.0 - (lor / 1200.0) * 30.0), 0, 100)
-    DNR_Score = None if dnr is None else clamp(max(70.0, 100.0 - (dnr / 1200.0) * 30.0), 0, 100)
-    CDF_Score = None if cdf is None else clamp(134.33333333333334 - 0.013333333333333334 * cdf, 0.0, 100.0)
+    # LoR_Score = None if lor is None else clamp(max(70.0, 100.0 - (lor / 1200.0) * 30.0), 0, 100)
+    # DNR_Score = None if dnr is None else clamp(max(70.0, 100.0 - (dnr / 1200.0) * 30.0), 0, 100)
+    # CDF_Score = 100 if cdf is None else clamp(134.33 - 0.0133 * cdf, 0.0, 100.0)
+    
+    # CE_Score  = MIN(100, MAX(50, 100 - CE*50))
+    CE_Score  = clamp(100.0 - ce_val * 50.0, 50.0, 100.0)
 
-    # --- Excel-style hard denominator (16.1) ---
-    def z(x): return 0.0 if x is None else x
-    numerator = (
-        z(DCR_Score) +
-        z(POD_Score) +
-        3.0 * z(CC_Score) +
-        5.0 * z(DNR_Score) +
-        5.0 * z(LoR_Score) +
-        (z(CE_Score) / 50.0) +
-        z(CDF_Score)
-    )
-    FinalScore = numerator / 16.1
+    # LoR_Score = MIN(100, MAX(0, 100 - (LoR/1200)*30))
+    LoR_Score = clamp(100.0 - (lor_val / 1200.0) * 30.0, 0.0, 100.0)
+
+    # DNR_Score = MIN(100, MAX(0, 100 - (DNR/1200)*30))
+    DNR_Score = clamp(100.0 - (dnr_val / 1200.0) * 30.0, 0.0, 100.0)
+
+    # CDF_Score = MIN(100, MAX(0, 100.33 - 0.01333 * CDF))
+    CDF_Score = clamp(100.33 - 0.01333 * cdf_val, 0.0, 100.0)
+
+    CE_Score  = round(CE_Score, 2)
+    LoR_Score = round(LoR_Score, 2)
+    DNR_Score = round(DNR_Score, 2)
+    CDF_Score = round(CDF_Score, 2)
+
+
+
+    if week_number is not None and week_number <= 40:
+        CDF_Score = cdf
+    else:
+        CDF_Score = CDF_Score 
+
+    def z(x: Optional[float]) -> float:
+        return 0.0 if x is None else float(x)
+
+    FinalScore: Optional[float] = None
+
+    # ==========================
+    #  OLD FORMULA (Week <= 40)
+    #  Total = AVERAGE(DCR,POD,CC,CDF)*100-Value-10*CE
+    #  Value = (DNR DPMO/Delivered-10*CE)*11+10*CE
+    # ==========================
+    if week_number is not None and week_number <= 40:
+        dcr_v = DCR_Score
+        pod_v = POD_Score
+        cc_v  = CC_Score
+        cdf_v = CDF_Score
+
+        vals = [v for v in [dcr_v, pod_v, cc_v, cdf_v] if v is not None]
+        if vals:
+            avg_base = sum(vals) / len(vals)  # already 0–100
+            ce_raw   = z(ce)
+            delivered_v = z(delivered)
+            dnr_v = z(dnr)
+
+            value_term = 0.0
+            if delivered_v > 0:
+                value_term = (dnr_v / delivered_v - 10.0 * ce_raw) * 11.0 + 10.0 * ce_raw
+
+            FinalScore = avg_base * 1.0 - value_term - 10.0 * ce_raw
+        else:
+            FinalScore = None
+
+    else:
+        # ==========================
+        #  NEW FORMULAS (Week >= 41)
+        #
+        # Week 41:
+        #   (DCR + POD + 3*CC + 5*DNR_Cal + 5*LOR_Cal + CE_Cal/50 + CDF_Cal) / 16.1
+        #
+        # Week 42:
+        #   same weights but / 16.5
+        #
+        # Week 43 and later:
+        #   (DCR + POD + 3*CC + 4*DNR_Cal + 4*LOR_Cal + CE_Cal/50 + CDF_Cal) / 14.1
+        # ==========================
+        denom = 14.1
+        w_dnr = 4.0
+        w_lor = 4.0
+
+        if week_number == 41:
+            denom = 16.1
+            w_dnr = 5.0
+            w_lor = 5.0
+        elif week_number == 42:
+            denom = 16.5
+            w_dnr = 5.0
+            w_lor = 5.0
+        # week 43+ uses default
+
+        numerator = (
+            z(DCR_Score) +
+            z(POD_Score) +
+            3.0 * z(CC_Score) +
+            w_dnr * z(DNR_Score) +
+            w_lor * z(LoR_Score) +
+            (z(CE_Score) / 50.0) +
+            z(CDF_Score)
+        )
+
+        FinalScore = numerator / denom if denom != 0 else None
 
     return {
         "POD_Score": POD_Score, "CC_Score": CC_Score, "DCR_Score": DCR_Score,
         "CE_Score": CE_Score, "LoR_Score": LoR_Score, "DNR_Score": DNR_Score,
-        "CDF_Score": CDF_Score, "FinalScore": FinalScore
+        "CDF_Score": CDF_Score, "FinalScore": round(FinalScore, 2)
     }
 
 # ===============================
@@ -254,7 +342,7 @@ def get_col(df: pd.DataFrame, canonical: str) -> Optional[str]:
     return None
 
 
-def extract_driver_rows(pdf: pdfplumber.PDF) -> List[Dict[str, Any]]:
+def extract_driver_rows(pdf: pdfplumber.PDF, week_number: Optional[int] = None) -> List[Dict[str, Any]]:
     def is_header_like(row: List[Any]) -> bool:
         if not row:
             return False
@@ -430,7 +518,7 @@ def extract_driver_rows(pdf: pdfplumber.PDF) -> List[Dict[str, Any]]:
                     "DNR DPMO":  to_num(r.get(dnr_c))        if dnr_c else None,
                     "CDF DPMO":  cdf_val,
                 }
-                rec.update(compute_scores(rec))
+                rec.update(compute_scores(rec, week_number=week_number))
                 rows.append(rec)
 
     return rows
@@ -458,7 +546,7 @@ def extract_summary(pdf: pdfplumber.PDF) -> Dict[str, Any]:
         res["overallScore"] = to_num(m.group(1))
 
     # Rank at station + WoW delta  e.g. "Rank at DBY5: 1 ( 0 WoW)"
-    if m := grab(r"Rank\s+at\s+([A-Z0-9\-]+)\s*:\s*(\d+)\s*\(\s*([+-]?\s*\d+)\s*WoW", re.IGNORECASE):
+    if m := grab(r"Rank\s+at\s+([A-Z0-0\-]+)\s*:\s*(\d+)\s*\(\s*([+-]?\s*\d+)\s*WoW", re.IGNORECASE):
         res["stationCode"] = clean_str(m.group(1))
         res["rankAtStation"] = int(m.group(2))
         # may include a leading plus/minus with space: "+ 3" / "0" / "- 2"
@@ -483,6 +571,7 @@ def extract_summary(pdf: pdfplumber.PDF) -> Dict[str, Any]:
         res["stationCount"] = int(m.group(2))
 
     return res
+
 # ===============================
 # RANKING
 # ===============================
@@ -522,9 +611,16 @@ def health():
 async def parse_pdf(file: UploadFile = File(...)):
     content = await file.read()
     with pdfplumber.open(io.BytesIO(content)) as pdf:
-        drivers = extract_driver_rows(pdf)
-        add_ranking_and_status(drivers)  # rank + bucket
+        # 1) summary first → get weekNumber
         summary = extract_summary(pdf)
+        week_number = summary.get("weekNumber") if summary else None
+
+        # 2) pass week_number into row extraction
+        drivers = extract_driver_rows(pdf, week_number=week_number)
+
+        # 3) rank + bucket
+        add_ranking_and_status(drivers)
+
     return {
         "count": len(drivers),
         "drivers": drivers,
