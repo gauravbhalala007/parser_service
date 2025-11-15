@@ -546,7 +546,8 @@ def extract_summary(pdf: pdfplumber.PDF) -> Dict[str, Any]:
         res["overallScore"] = to_num(m.group(1))
 
     # Rank at station + WoW delta  e.g. "Rank at DBY5: 1 ( 0 WoW)"
-    if m := grab(r"Rank\s+at\s+([A-Z0-0\-]+)\s*:\s*(\d+)\s*\(\s*([+-]?\s*\d+)\s*WoW", re.IGNORECASE):
+    
+    if m := grab(r"Rank\s+at\s+([A-Z0-9\-]+)\s*:\s*(\d+)\s*\(\s*([+-]?\s*\d+)\s*WoW", re.IGNORECASE):
         res["stationCode"] = clean_str(m.group(1))
         res["rankAtStation"] = int(m.group(2))
         # may include a leading plus/minus with space: "+ 3" / "0" / "- 2"
