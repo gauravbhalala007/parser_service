@@ -308,7 +308,7 @@ HEADER_MAP = {
     "dnr (dpmo)": "DNR DPMO",
     "dsc dpmo": "DNR DPMO",
     "DSC DPMO": "DNR DPMO",
-    "dnr (dpmo)": "DNR DPMO",
+    "dsc (dpmo)": "DNR DPMO",
     "cdf dpmo": "CDF DPMO",
     "cdf (dpmo)": "CDF DPMO",
     "cdfdpmo": "CDF DPMO",
