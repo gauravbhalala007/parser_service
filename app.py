@@ -21,17 +21,15 @@ app.add_middleware(
         "http://127.0.0.1:5000",
         "http://localhost:8080",
         "http://127.0.0.1:8080",
-        # you can also temporarily allow all for local:
-        # "*"
     ],
     allow_credentials=False,
-    allow_methods=["*"],     # POST included
-    allow_headers=["*"],     # Content-Type, etc.
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # or your exact Hosting origin(s)
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -63,7 +61,7 @@ class DriverRow(BaseModel):
 
     # Added for UI
     rank: Optional[int] = None
-    statusBucket: Optional[str] = None  # Fantastic / Great / Fair / Poor
+    statusBucket: Optional[str] = None
 
 class ParserSummary(BaseModel):
     overallScore: Optional[float] = None
@@ -74,7 +72,7 @@ class ParserSummary(BaseModel):
     weekText: Optional[str] = None
     weekNumber: Optional[int] = None
     year: Optional[int] = None
-    stationCode: Optional[str] = None  # e.g., DBY5 if present
+    stationCode: Optional[str] = None
 
     reliabilityNextDay: Optional[float] = None
     reliabilitySameDay: Optional[float] = None
@@ -93,19 +91,17 @@ def clean_str(x: Any) -> str:
     if x is None:
         return ""
     s = str(x)
-    # normalize common invisible separators to a space
     s = (
-        s.replace("\u00A0", " ")  # NBSP
-         .replace("\u2009", " ")  # THIN SPACE
-         .replace("\u202F", " ")  # NARROW NBSP
-         .replace("\u00AD", "")   # SOFT HYPHEN
+        s.replace("\u00A0", " ")
+         .replace("\u2009", " ")
+         .replace("\u202F", " ")
+         .replace("\u00AD", "")
          .replace("\n", " ")
          .replace("\r", " ")
     )
     return re.sub(r"\s+", " ", s).strip()
 
 def keyize(s: str) -> str:
-    """letters+digits only, lowercase; good for robust header matching"""
     return re.sub(r"[^a-z0-9]", "", s.lower())
 
 def to_num(x: Any) -> Optional[float]:
@@ -115,7 +111,6 @@ def to_num(x: Any) -> Optional[float]:
     if not s or s == "-":
         return None
     s = s.replace("%", "").replace(" ", "")
-    # Handle German/US number formats
     if "," in s and "." in s:
         if s.rfind(",") > s.rfind("."):
             s = s.replace(".", "").replace(",", ".")
@@ -159,13 +154,16 @@ def status_bucket(final_score: Optional[float]) -> str:
         return "FAIR"
     if s >= 0:
         return "POOR"
-    # if somehow negative, keep it simple:
     return "POOR"
 
 # ===============================
 # KPI FORMULAS (Albert’s rules)
 # ===============================
-def compute_scores(row: Dict[str, Any], week_number: Optional[int] = None) -> Dict[str, Optional[float]]:
+def compute_scores(
+    row: Dict[str, Any],
+    week_number: Optional[int] = None,
+    year: Optional[int] = None,   # <-- ADDED (only to decide FinalScore regime)
+) -> Dict[str, Optional[float]]:
     # --- parse raw values (unchanged) ---
     pod = to_percent(row.get("POD"))
     cc  = to_percent(row.get("CC"))
@@ -175,7 +173,7 @@ def compute_scores(row: Dict[str, Any], week_number: Optional[int] = None) -> Di
     dnr = to_num(row.get("DNR DPMO"))
     cdf = to_num(row.get("CDF DPMO"))
     delivered = to_num(row.get("Delivered"))
-        # Excel-style IF(ISNUMBER(x), x, 0) behaviour
+
     ce_val  = 0.0 if ce  is None else ce
     lor_val = 0.0 if lor is None else lor
     dnr_val = 0.0 if dnr is None else dnr
@@ -186,33 +184,27 @@ def compute_scores(row: Dict[str, Any], week_number: Optional[int] = None) -> Di
     CC_Score  = None if cc  is None else clamp(cc,  0, 100)
     DCR_Score = None if dcr is None else clamp(dcr, 0, 100)
     CE_Score  = None if ce  is None else clamp(100 - 50.0 * ce, 50, 100)
-    # LoR_Score = None if lor is None else clamp(max(70.0, 100.0 - (lor / 1200.0) * 30.0), 0, 100)
-    # DNR_Score = None if dnr is None else clamp(max(70.0, 100.0 - (dnr / 1200.0) * 30.0), 0, 100)
-    # CDF_Score = 100 if cdf is None else clamp(134.33 - 0.0133 * cdf, 0.0, 100.0)
-    
-    # CE_Score  = MIN(100, MAX(50, 100 - CE*50))
+
     CE_Score  = clamp(100.0 - ce_val * 50.0, 50.0, 100.0)
-
-    # LoR_Score = MIN(100, MAX(0, 100 - (LoR/1200)*30))
     LoR_Score = clamp(100.0 - (lor_val / 1200.0) * 30.0, 0.0, 100.0)
-
-    # DNR_Score = MIN(100, MAX(0, 100 - (DNR/1200)*30))
     DNR_Score = clamp(100.0 - (dnr_val / 1200.0) * 30.0, 0.0, 100.0)
 
-    # CDF_Score = MIN(100, MAX(0, 100.33 - 0.01333 * CDF))
-    CDF_Score = clamp(100.33 - 0.01333 * cdf_val, 0.0, 100.0)
+    # UPDATED: CDF score mode is decided strictly by header presence (not by value).
+    cdf_mode = row.get("_cdf_mode")  # "PCT" | "DPMO" | None
+    if cdf_mode == "PCT":
+        cdf_pct = to_percent(row.get("CDF"))
+        CDF_Score = clamp(cdf_pct, 0.0, 100.0)
+    elif cdf_mode == "DPMO":
+        cdf_dpmo = to_num(row.get("CDF DPMO"))
+        cdf_dpmo_val = 0.0 if cdf_dpmo is None else cdf_dpmo
+        CDF_Score = clamp(100.33 - 0.01333 * float(cdf_dpmo_val), 0.0, 100.0)
+    else:
+        CDF_Score = None
 
     CE_Score  = round(CE_Score, 2)
     LoR_Score = round(LoR_Score, 2)
     DNR_Score = round(DNR_Score, 2)
-    CDF_Score = round(CDF_Score, 2)
-
-
-
-    if week_number is not None and week_number <= 40:
-        CDF_Score = cdf
-    else:
-        CDF_Score = CDF_Score 
+    CDF_Score = None if CDF_Score is None else round(CDF_Score, 2)
 
     def z(x: Optional[float]) -> float:
         return 0.0 if x is None else float(x)
@@ -220,11 +212,25 @@ def compute_scores(row: Dict[str, Any], week_number: Optional[int] = None) -> Di
     FinalScore: Optional[float] = None
 
     # ==========================
-    #  OLD FORMULA (Week <= 40)
-    #  Total = AVERAGE(DCR,POD,CC,CDF)*100-Value-10*CE
-    #  Value = (DNR DPMO/Delivered-10*CE)*11+10*CE
+    # FINAL SCORE REGIME SWITCH (ONLY CHANGE):
+    # Old formula valid through (Year=2025, Week=40)
     # ==========================
-    if week_number is not None and week_number <= 40:
+    def use_old_formula(y: Optional[int], w: Optional[int]) -> bool:
+        if w is None:
+            return False
+        if y is None:
+            # If year is missing, keep legacy behavior (week-only)
+            return w <= 40
+        if y < 2025:
+            return True
+        if y == 2025 and w <= 40:
+            return True
+        return False
+
+    if use_old_formula(year, week_number):
+        # ==========================
+        #  OLD FORMULA
+        # ==========================
         dcr_v = DCR_Score
         pod_v = POD_Score
         cc_v  = CC_Score
@@ -232,7 +238,7 @@ def compute_scores(row: Dict[str, Any], week_number: Optional[int] = None) -> Di
 
         vals = [v for v in [dcr_v, pod_v, cc_v, cdf_v] if v is not None]
         if vals:
-            avg_base = sum(vals) / len(vals)  # already 0–100
+            avg_base = sum(vals) / len(vals)
             ce_raw   = z(ce)
             delivered_v = z(delivered)
             dnr_v = z(dnr)
@@ -247,30 +253,21 @@ def compute_scores(row: Dict[str, Any], week_number: Optional[int] = None) -> Di
 
     else:
         # ==========================
-        #  NEW FORMULAS (Week >= 41)
-        #
-        # Week 41:
-        #   (DCR + POD + 3*CC + 5*DNR_Cal + 5*LOR_Cal + CE_Cal/50 + CDF_Cal) / 16.1
-        #
-        # Week 42:
-        #   same weights but / 16.5
-        #
-        # Week 43 and later:
-        #   (DCR + POD + 3*CC + 4*DNR_Cal + 4*LOR_Cal + CE_Cal/50 + CDF_Cal) / 14.1
+        #  NEW FORMULAS
         # ==========================
         denom = 14.1
         w_dnr = 4.0
         w_lor = 4.0
 
-        if week_number == 41:
+        # Week-41/42 transition applies only for 2025 (otherwise week numbers repeat each year)
+        if year == 2025 and week_number == 41:
             denom = 16.1
             w_dnr = 5.0
             w_lor = 5.0
-        elif week_number == 42:
+        elif year == 2025 and week_number == 42:
             denom = 16.5
             w_dnr = 5.0
             w_lor = 5.0
-        # week 43+ uses default
 
         numerator = (
             z(DCR_Score) +
@@ -309,13 +306,13 @@ HEADER_MAP = {
     "dsc dpmo": "DNR DPMO",
     "DSC DPMO": "DNR DPMO",
     "dsc (dpmo)": "DNR DPMO",
+
     "cdf dpmo": "CDF DPMO",
     "cdf (dpmo)": "CDF DPMO",
     "cdfdpmo": "CDF DPMO",
     "cdfdpm0": "CDF DPMO",
-    "CDF": "CDF DPMO",
-    "cdf": "CDF DPMO",
-    "CDF  DPMO": "CDF DPMO",
+    "cdf": "CDF",
+
     "delivered": "Delivered",
     "zugestellte pakete": "Delivered",
 }
@@ -323,29 +320,23 @@ HEADER_MAP = {
 def norm_col(c: Any) -> str:
     raw = clean_str(c)
     k = keyize(raw)
-    # s = clean_str(c).lower()
-    # s = re.sub(r"\s+", " ", s)
-    # return HEADER_MAP.get(s, clean_str(c))
     return HEADER_MAP.get(k, raw)
-    
 
 # ===============================
 # PDF TABLE EXTRACTION
 # ===============================
-
 def get_col(df: pd.DataFrame, canonical: str) -> Optional[str]:
-    """
-    Return the actual column name in df that matches the canonical header
-    by keyized comparison, or None if not found.
-    """
     want = keyize(canonical)
     for col in df.columns:
         if keyize(col) == want:
             return col
     return None
 
-
-def extract_driver_rows(pdf: pdfplumber.PDF, week_number: Optional[int] = None) -> List[Dict[str, Any]]:
+def extract_driver_rows(
+    pdf: pdfplumber.PDF,
+    week_number: Optional[int] = None,
+    year: Optional[int] = None,   # <-- ADDED (only to pass into compute_scores)
+) -> List[Dict[str, Any]]:
     def is_header_like(row: List[Any]) -> bool:
         if not row:
             return False
@@ -354,7 +345,6 @@ def extract_driver_rows(pdf: pdfplumber.PDF, week_number: Optional[int] = None) 
 
     def looks_like_transporter_id(x: Any) -> bool:
         s = clean_str(x)
-        # Amazon IDs are typically uppercase letters+digits, ~10–16 chars
         return bool(re.match(r"^[A-Z0-9]{8,20}$", s))
 
     def coalesce_numbers(a, b):
@@ -384,8 +374,6 @@ def extract_driver_rows(pdf: pdfplumber.PDF, week_number: Optional[int] = None) 
         while i < len(h) - 1:
             cur = clean_str(h[i]); nxt = clean_str(h[i + 1])
             kcur = keyize(cur);    knxt = keyize(nxt)
-
-            # 'CE CDF DPMO' + ''  →  'CE', 'CDF DPMO'
             if ("ce" in kcur and ("cdfdpmo" in kcur or "cdf" in kcur)) and (knxt == "" or nxt == ""):
                 h[i] = "CE"
                 h[i + 1] = "CDF DPMO"
@@ -395,7 +383,6 @@ def extract_driver_rows(pdf: pdfplumber.PDF, week_number: Optional[int] = None) 
         return h
 
     def build_df_with_header(header: List[str], raw_rows: List[List[Any]]) -> pd.DataFrame:
-        # normalize header & pad/truncate rows
         header = [norm_col(h) for h in header]
         header = split_combo_headers(header)
         hlen = len(header)
@@ -409,7 +396,6 @@ def extract_driver_rows(pdf: pdfplumber.PDF, week_number: Optional[int] = None) 
             fixed.append(rr)
         df = pd.DataFrame(fixed, columns=header)
 
-        # rename using HEADER_MAP keys
         rename_map = {}
         for col in df.columns:
             kcol = keyize(col)
@@ -420,7 +406,6 @@ def extract_driver_rows(pdf: pdfplumber.PDF, week_number: Optional[int] = None) 
         if rename_map:
             df = df.rename(columns=rename_map)
 
-        # if DPMO columns still missing, try adjacent merges
         if get_col(df, "CDF DPMO") is None:
             df = merge_adjacent_cols_if_needed(df, "CDF DPMO")
         if get_col(df, "LoR DPMO") is None:
@@ -455,10 +440,8 @@ def extract_driver_rows(pdf: pdfplumber.PDF, week_number: Optional[int] = None) 
             header: List[str] | None = None
             data_start = 1
 
-            # Case A: this table has a header row (or two)
             if "Transporter ID" in raw0 or is_header_like(raw0):
                 if raw1 and is_header_like(raw1):
-                    # two-row header
                     combined = []
                     for a, b in zip(raw0, raw1):
                         if a and b: combined.append(f"{a} {b}".strip())
@@ -469,20 +452,16 @@ def extract_driver_rows(pdf: pdfplumber.PDF, week_number: Optional[int] = None) 
                 else:
                     header = raw0
                     data_start = 1
-                last_header = header[:]  # remember for next pages
-
-            # Case B: continuation table without header → reuse last_header
+                last_header = header[:]
             elif last_header is not None and table and looks_like_transporter_id(table[0][0]):
                 header = last_header[:]
-                data_start = 0  # first row is data
+                data_start = 0
 
-            # Otherwise, skip (definitions, legends, other tables)
             if header is None:
                 continue
 
             df = build_df_with_header(header, table[data_start:])
 
-            # Need Transporter ID
             tid_col = get_col(df, "Transporter ID")
             if tid_col is None:
                 continue
@@ -494,21 +473,30 @@ def extract_driver_rows(pdf: pdfplumber.PDF, week_number: Optional[int] = None) 
             ce_c        = get_col(df, "CE")
             lor_c       = get_col(df, "LoR DPMO")
             dnr_c       = get_col(df, "DNR DPMO")
-            cdf_c       = get_col(df, "CDF DPMO")
+
+            cdf_pct_c   = get_col(df, "CDF")
+            cdf_dpmo_c  = get_col(df, "CDF DPMO")
+            cdf_mode = None
+            if cdf_pct_c is not None:
+                cdf_mode = "PCT"
+            elif cdf_dpmo_c is not None:
+                cdf_mode = "DPMO"
 
             for _, r in df.iterrows():
                 tid = clean_str(r.get(tid_col))
                 if not tid or tid.lower() == "none":
                     continue
 
-                ce_val  = to_num(r.get(ce_c))  if ce_c  else None
-                cdf_val = to_num(r.get(cdf_c)) if cdf_c else None
+                ce_val = to_num(r.get(ce_c)) if ce_c else None
+                cdf_dpmo_val = to_num(r.get(cdf_dpmo_c)) if cdf_dpmo_c else None
+                cdf_pct_val  = to_percent(r.get(cdf_pct_c)) if cdf_pct_c else None
 
-                # Row-level fallback if CE & CDF got packed into one cell
-                if ce_c and cdf_c is None and ce_val is None:
+                if ce_c and cdf_dpmo_c is None and ce_val is None:
                     ce_try, cdf_try = split_ce_cdf_cell(r.get(ce_c))
-                    if ce_val is None:  ce_val  = ce_try
-                    if cdf_val is None: cdf_val = cdf_try
+                    if ce_val is None:
+                        ce_val = ce_try
+                    if cdf_dpmo_val is None:
+                        cdf_dpmo_val = cdf_try
 
                 rec = {
                     "Transporter ID": tid,
@@ -519,9 +507,13 @@ def extract_driver_rows(pdf: pdfplumber.PDF, week_number: Optional[int] = None) 
                     "CE":        ce_val,
                     "LoR DPMO":  to_num(r.get(lor_c))        if lor_c else None,
                     "DNR DPMO":  to_num(r.get(dnr_c))        if dnr_c else None,
-                    "CDF DPMO":  cdf_val,
+                    "CDF DPMO":  cdf_dpmo_val,
+                    "CDF":       cdf_pct_val,
+                    "_cdf_mode": cdf_mode,
                 }
-                rec.update(compute_scores(rec, week_number=week_number))
+
+                # ONLY CHANGE: pass year into compute_scores so FinalScore regime uses (year, week)
+                rec.update(compute_scores(rec, week_number=week_number, year=year))
                 rows.append(rec)
 
     return rows
@@ -534,42 +526,30 @@ def extract_summary(pdf: pdfplumber.PDF) -> Dict[str, Any]:
     res: Dict[str, Any] = {}
 
     def grab(rex: str, flags=re.IGNORECASE):
-        m = re.search(rex, text, flags)
-        return m
+        return re.search(rex, text, flags)
 
-    # Week number & year  e.g. "Week 42 - 2025"
     if m := grab(r"\bWeek\s+(\d{1,2})\s*-\s*(\d{4})\b"):
         res["weekNumber"] = int(m.group(1))
         res["year"] = int(m.group(2))
         res["weekText"] = f"Week {m.group(1)} - {m.group(2)}"
 
-    # Overall score  e.g. "Overall Score: 84.98 | Fantastic"
     if m := grab(r"Overall\s+Score:\s*([\d.,]+)"):
-        # to_num converts "84,98" or "84.98" -> float
         res["overallScore"] = to_num(m.group(1))
 
-    # Rank at station + WoW delta  e.g. "Rank at DBY5: 1 ( 0 WoW)"
-    
     if m := grab(r"Rank\s+at\s+([A-Z0-9\-]+)\s*:\s*(\d+)\s*\(\s*([+-]?\s*\d+)\s*WoW", re.IGNORECASE):
         res["stationCode"] = clean_str(m.group(1))
         res["rankAtStation"] = int(m.group(2))
-        # may include a leading plus/minus with space: "+ 3" / "0" / "- 2"
         res["rankDeltaWoW"] = int(to_num(m.group(3)) or 0)
 
-    # Reliability (two flavors)
-    # Next Day Capacity Reliability 102.08%
     if m := grab(r"Next\s+Day\s+Capacity\s+Reliability\s+([\d.,]+)\s*%"):
         res["reliabilityNextDay"] = to_num(m.group(1))
 
-    # Same Day / Sub-Same Day Capacity Reliability 107%
     if m := grab(r"(?:Same\s+Day|Sub-?Same\s+Day)[^%]*?Capacity\s+Reliability\s+([\d.,]+)\s*%"):
         res["reliabilitySameDay"] = to_num(m.group(1))
 
-    # For backward compatibility, also populate 'reliabilityScore' with Next-Day if available
     if res.get("reliabilityNextDay") is not None:
         res["reliabilityScore"] = res["reliabilityNextDay"]
 
-    # Rank “in station X of Y” pattern (if such a variant exists in other PDFs)
     if m := grab(r"(?:Rank\s+(?:in\s+Station|at\s+[A-Z0-9\-]+))\D*(\d+)\D*(?:of|/|von)\D*(\d+)", re.IGNORECASE):
         res["rankAtStation"] = int(m.group(1))
         res["stationCount"] = int(m.group(2))
@@ -580,14 +560,9 @@ def extract_summary(pdf: pdfplumber.PDF) -> Dict[str, Any]:
 # RANKING
 # ===============================
 def add_ranking_and_status(drivers: List[Dict[str, Any]]) -> None:
-    """
-    Dense rank by FinalScore desc. Adds 'rank' (1..N) and 'statusBucket'.
-    """
-    # Sort copy to compute rank
     sortable = [d for d in drivers if isinstance(d.get("FinalScore"), (int, float))]
     sortable.sort(key=lambda x: x["FinalScore"], reverse=True)
 
-    # Dense rank
     rank = 0
     last_score = None
     score_to_rank: Dict[float, int] = {}
@@ -598,7 +573,6 @@ def add_ranking_and_status(drivers: List[Dict[str, Any]]) -> None:
             last_score = fs
         score_to_rank[fs] = rank
 
-    # Apply rank & bucket
     for d in drivers:
         fs = d.get("FinalScore")
         d["rank"] = score_to_rank.get(fs) if isinstance(fs, (int, float)) else None
@@ -615,15 +589,18 @@ def health():
 async def parse_pdf(file: UploadFile = File(...)):
     content = await file.read()
     with pdfplumber.open(io.BytesIO(content)) as pdf:
-        # 1) summary first → get weekNumber
         summary = extract_summary(pdf)
         week_number = summary.get("weekNumber") if summary else None
+        year = summary.get("year") if summary else None  # <-- ADDED
 
-        # 2) pass week_number into row extraction
-        drivers = extract_driver_rows(pdf, week_number=week_number)
+        # ONLY CHANGE: pass year through so FinalScore uses (year, week)
+        drivers = extract_driver_rows(pdf, week_number=week_number, year=year)
 
-        # 3) rank + bucket
         add_ranking_and_status(drivers)
+
+    for d in drivers:
+        if isinstance(d, dict) and "_cdf_mode" in d:
+            d.pop("_cdf_mode", None)
 
     return {
         "count": len(drivers),
