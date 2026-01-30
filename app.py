@@ -65,6 +65,7 @@ class DriverRow(BaseModel):
 
 class ParserSummary(BaseModel):
     overallScore: Optional[float] = None
+    overallStatus: Optional[str] = None
     reliabilityScore: Optional[float] = None
     rankAtStation: Optional[int] = None
     stationCount: Optional[int] = None
@@ -533,8 +534,14 @@ def extract_summary(pdf: pdfplumber.PDF) -> Dict[str, Any]:
         res["year"] = int(m.group(2))
         res["weekText"] = f"Week {m.group(1)} - {m.group(2)}"
 
-    if m := grab(r"Overall\s+Score:\s*([\d.,]+)"):
+    if m := grab(r"Overall\s+Score:\s*([\d.,]+)(?:\s*[|/]\s*([A-Za-z+\- ]+))?"):
         res["overallScore"] = to_num(m.group(1))
+        if m.group(2):
+            res["overallStatus"] = clean_str(m.group(2)).upper().replace(" ", "_")
+
+    if res.get("overallStatus") is None:
+        if m := grab(r"\bOverall\s+(?:Standing|Performance)\s+(?:as|is|:)?\s*([A-Za-z+\- ]+)\b"):
+            res["overallStatus"] = clean_str(m.group(1)).upper().replace(" ", "_")
 
     if m := grab(r"Rank\s+at\s+([A-Z0-9\-]+)\s*:\s*(\d+)\s*\(\s*([+-]?\s*\d+)\s*WoW", re.IGNORECASE):
         res["stationCode"] = clean_str(m.group(1))
