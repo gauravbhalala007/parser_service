@@ -1,4 +1,4 @@
-# app.py
+# parser_service/app.py
 # Robust FastAPI Parser for Amazon DSP KPI PDFs with ranking & status bucket
 from fastapi import FastAPI, File, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -63,6 +63,17 @@ class DriverRow(BaseModel):
     rank: Optional[int] = None
     statusBucket: Optional[str] = None
 
+    # POD Quality (driver-level counts)
+    POD_Q_Opportunities: Optional[float] = None
+    POD_Q_Success: Optional[float] = None
+    POD_Q_Bypass: Optional[float] = None
+    POD_Q_Rejects: Optional[float] = None
+    POD_Q_BlurryPhoto: Optional[float] = None
+    POD_Q_PhotoTooDark: Optional[float] = None
+    POD_Q_NoPackageDetected: Optional[float] = None
+    POD_Q_PackageInCar: Optional[float] = None
+    POD_Q_PackageTooClose: Optional[float] = None
+
 class ParserSummary(BaseModel):
     overallScore: Optional[float] = None
     overallStatus: Optional[str] = None
@@ -77,6 +88,9 @@ class ParserSummary(BaseModel):
 
     reliabilityNextDay: Optional[float] = None
     reliabilitySameDay: Optional[float] = None
+
+    podQualitySummary: Optional[Dict[str, Any]] = None
+    podQualityRejects: Optional[Dict[str, Any]] = None
 
 class ParserResponse(BaseModel):
     count: int
@@ -564,6 +578,121 @@ def extract_summary(pdf: pdfplumber.PDF) -> Dict[str, Any]:
     return res
 
 # ===============================
+# POD QUALITY EXTRACTION
+# ===============================
+def _is_pod_quality_pdf(pdf: pdfplumber.PDF, filename: str) -> bool:
+    name = (filename or "").lower()
+    if "pod-quality" in name or "pod_quality" in name:
+        return True
+    first_text = clean_str(pdf.pages[0].extract_text() or "").lower()
+    return "photo on delivery quality report" in first_text
+
+def _extract_pod_quality_summary(pdf: pdfplumber.PDF, filename: str) -> Dict[str, Any]:
+    res: Dict[str, Any] = {}
+    text = clean_str(pdf.pages[0].extract_text() or "")
+
+    if m := re.search(r"\b([A-Z0-9]{3,6})\s*-\s*Week\s*(\d{1,2})\b", text):
+        res["stationCode"] = m.group(1)
+        res["weekNumber"] = int(m.group(2))
+        res["weekText"] = f"Week {m.group(2)}"
+
+    if "year" not in res and filename:
+        if m := re.search(r"(20\d{2})", filename):
+            res["year"] = int(m.group(1))
+
+    pod_summary: Dict[str, Any] = {}
+    pod_rejects: Dict[str, Any] = {}
+
+    tables = pdf.pages[0].extract_tables() or []
+    for table in tables:
+        if not table or len(table) < 2:
+            continue
+        header = [clean_str(c).lower() for c in table[0]]
+        if "category" in header and any("total opportunities" in h for h in header):
+            for row in table[1:]:
+                cat = clean_str(row[0]).lower()
+                cnt = to_num(row[1])
+                pct = to_percent(row[2])
+                key = keyize(cat)
+                if key == "success":
+                    pod_summary["successCount"] = cnt
+                    pod_summary["successPct"] = pct
+                elif key == "bypass":
+                    pod_summary["bypassCount"] = cnt
+                    pod_summary["bypassPct"] = pct
+                elif key == "rejects":
+                    pod_summary["rejectsCount"] = cnt
+                    pod_summary["rejectsPct"] = pct
+                elif key == "opportunities":
+                    pod_summary["opportunitiesCount"] = cnt
+                    pod_summary["opportunitiesPct"] = pct
+        elif "category" in header and any("total rejects" in h for h in header):
+            for row in table[1:]:
+                cat = clean_str(row[0]).lower()
+                cnt = to_num(row[1])
+                pct = to_percent(row[2])
+                key = keyize(cat)
+                if key == "blurryphoto":
+                    pod_rejects["blurryPhotoCount"] = cnt
+                    pod_rejects["blurryPhotoPct"] = pct
+                elif key == "phototoodark":
+                    pod_rejects["photoTooDarkCount"] = cnt
+                    pod_rejects["photoTooDarkPct"] = pct
+                elif key == "nopackagedetected":
+                    pod_rejects["noPackageDetectedCount"] = cnt
+                    pod_rejects["noPackageDetectedPct"] = pct
+                elif key == "packageincar":
+                    pod_rejects["packageInCarCount"] = cnt
+                    pod_rejects["packageInCarPct"] = pct
+                elif key == "packagetooclose":
+                    pod_rejects["packageTooCloseCount"] = cnt
+                    pod_rejects["packageTooClosePct"] = pct
+                elif key in ("grandtotal", "total"):
+                    pod_rejects["totalRejectsCount"] = cnt
+                    pod_rejects["totalRejectsPct"] = pct
+
+    if pod_summary:
+        res["podQualitySummary"] = pod_summary
+    if pod_rejects:
+        res["podQualityRejects"] = pod_rejects
+
+    return res
+
+def _extract_pod_quality_drivers(pdf: pdfplumber.PDF) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+
+    def looks_like_transporter_id(x: Any) -> bool:
+        s = clean_str(x)
+        return bool(re.match(r"^[A-Z0-9]{8,20}$", s))
+
+    for page in pdf.pages:
+        tables = page.extract_tables() or []
+        for table in tables:
+            if not table:
+                continue
+            for row in table:
+                tid = clean_str(row[0])
+                if not looks_like_transporter_id(tid):
+                    continue
+                r = list(row) + [""] * 10
+                rows.append(
+                    {
+                        "Transporter ID": tid,
+                        "POD_Q_Opportunities": to_num(r[1]),
+                        "POD_Q_Success": to_num(r[2]),
+                        "POD_Q_Bypass": to_num(r[3]),
+                        "POD_Q_Rejects": to_num(r[4]),
+                        "POD_Q_BlurryPhoto": to_num(r[5]),
+                        "POD_Q_NoPackageDetected": to_num(r[6]),
+                        "POD_Q_PackageInCar": to_num(r[7]),
+                        "POD_Q_PackageTooClose": to_num(r[8]),
+                        "POD_Q_PhotoTooDark": to_num(r[9]),
+                    }
+                )
+
+    return rows
+
+# ===============================
 # RANKING
 # ===============================
 def add_ranking_and_status(drivers: List[Dict[str, Any]]) -> None:
@@ -596,14 +725,18 @@ def health():
 async def parse_pdf(file: UploadFile = File(...)):
     content = await file.read()
     with pdfplumber.open(io.BytesIO(content)) as pdf:
-        summary = extract_summary(pdf)
-        week_number = summary.get("weekNumber") if summary else None
-        year = summary.get("year") if summary else None  # <-- ADDED
+        if _is_pod_quality_pdf(pdf, file.filename or ""):
+            summary = _extract_pod_quality_summary(pdf, file.filename or "")
+            drivers = _extract_pod_quality_drivers(pdf)
+        else:
+            summary = extract_summary(pdf)
+            week_number = summary.get("weekNumber") if summary else None
+            year = summary.get("year") if summary else None  # <-- ADDED
 
-        # ONLY CHANGE: pass year through so FinalScore uses (year, week)
-        drivers = extract_driver_rows(pdf, week_number=week_number, year=year)
+            # ONLY CHANGE: pass year through so FinalScore uses (year, week)
+            drivers = extract_driver_rows(pdf, week_number=week_number, year=year)
 
-        add_ranking_and_status(drivers)
+            add_ranking_and_status(drivers)
 
     for d in drivers:
         if isinstance(d, dict) and "_cdf_mode" in d:
