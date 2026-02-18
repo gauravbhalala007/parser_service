@@ -155,11 +155,34 @@ def to_percent(x: Any) -> Optional[float]:
 def clamp(v: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, v))
 
-def status_bucket(final_score: Optional[float]) -> str:
+def _is_week10_policy_active(
+    year: Optional[int],
+    week_number: Optional[int],
+) -> bool:
+    # Policy change starts at scorecard week 9 of 2026 and remains active.
+    if year is None:
+        return False
+    if year > 2026:
+        return True
+    if year < 2026:
+        return False
+    return (week_number or 0) >= 9
+
+def _fantastic_plus_cutoff(
+    year: Optional[int],
+    week_number: Optional[int],
+) -> float:
+    return 88.0 if _is_week10_policy_active(year, week_number) else 93.0
+
+def status_bucket(
+    final_score: Optional[float],
+    week_number: Optional[int] = None,
+    year: Optional[int] = None,
+) -> str:
     if final_score is None:
         return "Unknown"
     s = float(final_score)
-    if s >= 93:
+    if s >= _fantastic_plus_cutoff(year, week_number):
         return "FANTASTIC_PLUS"
     if s >= 85:
         return "FANTASTIC"
@@ -695,7 +718,11 @@ def _extract_pod_quality_drivers(pdf: pdfplumber.PDF) -> List[Dict[str, Any]]:
 # ===============================
 # RANKING
 # ===============================
-def add_ranking_and_status(drivers: List[Dict[str, Any]]) -> None:
+def add_ranking_and_status(
+    drivers: List[Dict[str, Any]],
+    week_number: Optional[int] = None,
+    year: Optional[int] = None,
+) -> None:
     sortable = [d for d in drivers if isinstance(d.get("FinalScore"), (int, float))]
     sortable.sort(key=lambda x: x["FinalScore"], reverse=True)
 
@@ -712,7 +739,7 @@ def add_ranking_and_status(drivers: List[Dict[str, Any]]) -> None:
     for d in drivers:
         fs = d.get("FinalScore")
         d["rank"] = score_to_rank.get(fs) if isinstance(fs, (int, float)) else None
-        d["statusBucket"] = status_bucket(fs)
+        d["statusBucket"] = status_bucket(fs, week_number=week_number, year=year)
 
 # ===============================
 # ROUTES
@@ -736,7 +763,7 @@ async def parse_pdf(file: UploadFile = File(...)):
             # ONLY CHANGE: pass year through so FinalScore uses (year, week)
             drivers = extract_driver_rows(pdf, week_number=week_number, year=year)
 
-            add_ranking_and_status(drivers)
+            add_ranking_and_status(drivers, week_number=week_number, year=year)
 
     for d in drivers:
         if isinstance(d, dict) and "_cdf_mode" in d:
