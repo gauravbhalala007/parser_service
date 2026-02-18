@@ -605,10 +605,37 @@ def extract_summary(pdf: pdfplumber.PDF) -> Dict[str, Any]:
 # ===============================
 def _is_pod_quality_pdf(pdf: pdfplumber.PDF, filename: str) -> bool:
     name = (filename or "").lower()
-    if "pod-quality" in name or "pod_quality" in name:
+    if any(tag in name for tag in ("pod-quality", "pod_quality", "photo_on_delivery")):
         return True
-    first_text = clean_str(pdf.pages[0].extract_text() or "").lower()
-    return "photo on delivery quality report" in first_text
+
+    # Check text on first two pages for common POD report signatures.
+    first_pages_text = " ".join(
+        clean_str(p.extract_text() or "").lower() for p in pdf.pages[:2]
+    )
+    text_signatures = (
+        "photo on delivery quality report",
+        "pod quality report",
+        "photo on delivery quality",
+    )
+    if any(sig in first_pages_text for sig in text_signatures):
+        return True
+
+    # Fallback: detect POD summary tables by header patterns.
+    for page in pdf.pages[:2]:
+        for table in page.extract_tables() or []:
+            if not table or not table[0]:
+                continue
+            header_cells = [clean_str(c).lower() for c in table[0]]
+            header_text = " ".join(header_cells)
+            has_category = "category" in header_cells or "category" in header_text
+            has_pod_totals = (
+                "total opportunities" in header_text or
+                "total rejects" in header_text
+            )
+            if has_category and has_pod_totals:
+                return True
+
+    return False
 
 def _extract_pod_quality_summary(pdf: pdfplumber.PDF, filename: str) -> Dict[str, Any]:
     res: Dict[str, Any] = {}
