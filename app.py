@@ -249,22 +249,43 @@ def compute_scores(
 
     FinalScore: Optional[float] = None
 
-    # Excel sheet equivalent:
-    #   Total Score = AVERAGE(DCR, POD, CC, DEX) * 100 - DNR Quote - 10 * CE
-    #   DNR Quote   = ((DNR / Delivered) - 10 * CE) * 11 + 10 * CE
-    #
-    # In the PDFs CE is extracted as a positive event count, while the sheet
-    # stores CE as a negative value. Normalize to the sheet sign here so the
-    # parser produces the same penalty as the spreadsheet.
+    def dsc_penalty_rate(dpmo: float) -> float:
+        if dpmo <= 0:
+            return 0.0
+        if dpmo < 600:
+            return 0.05
+        if dpmo <= 1000:
+            return 0.08
+        if dpmo <= 2500:
+            return 0.20
+        if dpmo <= 5000:
+            return 0.35
+        if dpmo <= 10000:
+            return 0.50
+        return 0.70
+
+    def lor_penalty_rate(dpmo: float) -> float:
+        if dpmo <= 0:
+            return 0.0
+        if dpmo <= 500:
+            return 0.10
+        if dpmo <= 1500:
+            return 0.25
+        if dpmo <= 4000:
+            return 0.40
+        return 0.80
+
+    # Final score uses the KPI average as the base, then applies:
+    #   1) a direct CE penalty
+    #   2) a DSC/DNR DPMO percentage penalty based on manager thresholds
+    #   3) a LoR DPMO percentage penalty based on manager thresholds
     vals = [v for v in [DCR_Score, POD_Score, CC_Score, CDF_Score] if v is not None]
     if vals:
         avg_base = sum(vals) / len(vals)
-        delivered_v = z(delivered)
-        dnr_v = z(dnr)
-        ce_sheet = -abs(ce_val)
-        dnr_ratio = (dnr_v / delivered_v) if delivered_v > 0 else 0.0
-        dnr_quote = ((dnr_ratio - 10.0 * ce_sheet) * 11.0) + (10.0 * ce_sheet)
-        FinalScore = avg_base - dnr_quote - 10.0 * ce_sheet
+        ce_penalty = 90.0 * abs(ce_val)
+        dsc_penalty = avg_base * dsc_penalty_rate(dnr_val)
+        lor_penalty = avg_base * lor_penalty_rate(lor_val)
+        FinalScore = avg_base - ce_penalty - dsc_penalty - lor_penalty
 
     return {
         "POD_Score": POD_Score, "CC_Score": CC_Score, "DCR_Score": DCR_Score,
