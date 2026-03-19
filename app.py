@@ -249,75 +249,22 @@ def compute_scores(
 
     FinalScore: Optional[float] = None
 
-    # ==========================
-    # FINAL SCORE REGIME SWITCH (ONLY CHANGE):
-    # Old formula valid through (Year=2025, Week=40)
-    # ==========================
-    def use_old_formula(y: Optional[int], w: Optional[int]) -> bool:
-        if w is None:
-            return False
-        if y is None:
-            # If year is missing, keep legacy behavior (week-only)
-            return w <= 40
-        if y < 2025:
-            return True
-        if y == 2025 and w <= 40:
-            return True
-        return False
-
-    if use_old_formula(year, week_number):
-        # ==========================
-        #  OLD FORMULA
-        # ==========================
-        dcr_v = DCR_Score
-        pod_v = POD_Score
-        cc_v  = CC_Score
-        cdf_v = CDF_Score
-
-        vals = [v for v in [dcr_v, pod_v, cc_v, cdf_v] if v is not None]
-        if vals:
-            avg_base = sum(vals) / len(vals)
-            ce_raw   = z(ce)
-            delivered_v = z(delivered)
-            dnr_v = z(dnr)
-
-            value_term = 0.0
-            if delivered_v > 0:
-                value_term = (dnr_v / delivered_v - 10.0 * ce_raw) * 11.0 + 10.0 * ce_raw
-
-            FinalScore = avg_base * 1.0 - value_term - 10.0 * ce_raw
-        else:
-            FinalScore = None
-
-    else:
-        # ==========================
-        #  NEW FORMULAS
-        # ==========================
-        denom = 14.1
-        w_dnr = 4.0
-        w_lor = 4.0
-
-        # Week-41/42 transition applies only for 2025 (otherwise week numbers repeat each year)
-        if year == 2025 and week_number == 41:
-            denom = 16.1
-            w_dnr = 5.0
-            w_lor = 5.0
-        elif year == 2025 and week_number == 42:
-            denom = 16.5
-            w_dnr = 5.0
-            w_lor = 5.0
-
-        numerator = (
-            z(DCR_Score) +
-            z(POD_Score) +
-            3.0 * z(CC_Score) +
-            w_dnr * z(DNR_Score) +
-            w_lor * z(LoR_Score) +
-            (z(CE_Score) / 50.0) +
-            z(CDF_Score)
-        )
-
-        FinalScore = numerator / denom if denom != 0 else None
+    # Excel sheet equivalent:
+    #   Total Score = AVERAGE(DCR, POD, CC, DEX) * 100 - DNR Quote - 10 * CE
+    #   DNR Quote   = ((DNR / Delivered) - 10 * CE) * 11 + 10 * CE
+    #
+    # In the PDFs CE is extracted as a positive event count, while the sheet
+    # stores CE as a negative value. Normalize to the sheet sign here so the
+    # parser produces the same penalty as the spreadsheet.
+    vals = [v for v in [DCR_Score, POD_Score, CC_Score, CDF_Score] if v is not None]
+    if vals:
+        avg_base = sum(vals) / len(vals)
+        delivered_v = z(delivered)
+        dnr_v = z(dnr)
+        ce_sheet = -abs(ce_val)
+        dnr_ratio = (dnr_v / delivered_v) if delivered_v > 0 else 0.0
+        dnr_quote = ((dnr_ratio - 10.0 * ce_sheet) * 11.0) + (10.0 * ce_sheet)
+        FinalScore = avg_base - dnr_quote - 10.0 * ce_sheet
 
     return {
         "POD_Score": POD_Score, "CC_Score": CC_Score, "DCR_Score": DCR_Score,
