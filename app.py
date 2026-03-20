@@ -155,25 +155,6 @@ def to_percent(x: Any) -> Optional[float]:
 def clamp(v: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, v))
 
-def _is_week10_policy_active(
-    year: Optional[int],
-    week_number: Optional[int],
-) -> bool:
-    # Policy change starts at scorecard week 9 of 2026 and remains active.
-    if year is None:
-        return False
-    if year > 2026:
-        return True
-    if year < 2026:
-        return False
-    return (week_number or 0) >= 9
-
-def _fantastic_plus_cutoff(
-    year: Optional[int],
-    week_number: Optional[int],
-) -> float:
-    return 88.0 if _is_week10_policy_active(year, week_number) else 93.0
-
 def status_bucket(
     final_score: Optional[float],
     week_number: Optional[int] = None,
@@ -182,9 +163,9 @@ def status_bucket(
     if final_score is None:
         return "Unknown"
     s = float(final_score)
-    if s >= _fantastic_plus_cutoff(year, week_number):
+    if s >= 93.0:
         return "FANTASTIC_PLUS"
-    if s >= 85:
+    if s >= 86.0:
         return "FANTASTIC"
     if s >= 70:
         return "GREAT"
