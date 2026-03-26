@@ -91,6 +91,8 @@ class ParserSummary(BaseModel):
 
     podQualitySummary: Optional[Dict[str, Any]] = None
     podQualityRejects: Optional[Dict[str, Any]] = None
+    complianceAndSafety: Optional[Dict[str, Any]] = None
+    deliveryQualitySwc: Optional[Dict[str, Any]] = None
 
 class ParserResponse(BaseModel):
     count: int
@@ -155,6 +157,14 @@ def to_percent(x: Any) -> Optional[float]:
 def clamp(v: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, v))
 
+def normalize_status_label(raw: Any) -> str:
+    s = clean_str(raw)
+    if not s:
+        return ""
+    s = re.sub(r"[\s\-]+", "_", s.upper())
+    s = re.sub(r"[^A-Z0-9_]", "", s)
+    return s.strip("_")
+
 def status_bucket(
     final_score: Optional[float],
     week_number: Optional[int] = None,
@@ -174,6 +184,168 @@ def status_bucket(
     if s >= 0:
         return "POOR"
     return "POOR"
+
+def _extract_metric_token(
+    text: str,
+    label: str,
+    next_labels: List[str],
+) -> Optional[str]:
+    lookahead = ""
+    if next_labels:
+        joined = "|".join(re.escape(v) for v in next_labels)
+        lookahead = rf"(?=\s+(?:{joined})\b|$)"
+    pattern = re.compile(rf"{re.escape(label)}\s+(.+?){lookahead}", re.IGNORECASE)
+    match = pattern.search(text)
+    if not match:
+        return None
+    return clean_str(match.group(1))
+
+def _extract_tokens_by_labels(
+    text: str,
+    labels: List[str],
+) -> Dict[str, str]:
+    found: List[tuple[str, int]] = []
+    cursor = 0
+    lower_text = text.lower()
+
+    for label in labels:
+        idx = lower_text.find(label.lower(), cursor)
+        if idx < 0:
+            continue
+        found.append((label, idx))
+        cursor = idx + len(label)
+
+    tokens: Dict[str, str] = {}
+    for i, (label, start) in enumerate(found):
+        value_start = start + len(label)
+        value_end = found[i + 1][1] if i + 1 < len(found) else len(text)
+        tokens[label] = clean_str(text[value_start:value_end])
+    return tokens
+
+def _parse_metric_value(token: Optional[str]) -> Optional[Dict[str, Any]]:
+    s = clean_str(token)
+    if not s:
+        return None
+    s = re.sub(r"^[^A-Za-z0-9]+", "", s)
+    s = re.sub(r"\s+", " ", s).strip()
+
+    value_part = s
+    status_part = ""
+    if "|" in s:
+        left, right = s.split("|", 1)
+        value_part = clean_str(left)
+        status_part = clean_str(right)
+
+    parsed_num = to_num(value_part)
+    value: Any = parsed_num if parsed_num is not None else value_part
+    out: Dict[str, Any] = {"value": value}
+    if status_part:
+        out["status"] = normalize_status_label(status_part)
+    return out
+
+def _parse_scorecard_summary_sections(pdf: pdfplumber.PDF) -> Dict[str, Any]:
+    page_text = ""
+    for page in pdf.pages[:3]:
+        text = page.extract_text() or ""
+        if "Compliance and Safety" in text and "Delivery Quality & SWC" in text:
+            page_text = text
+            break
+    if not page_text:
+        return {}
+
+    flat = clean_str(page_text)
+    result: Dict[str, Any] = {}
+
+    safety_overall = re.search(
+        r"Compliance and Safety\s+([A-Za-z ]+?)\s+Safety\s+Compliance",
+        flat,
+        re.IGNORECASE,
+    )
+    delivery_overall = re.search(
+        r"Delivery Quality\s*&\s*SWC:\s*([A-Za-z ]+?)\s+Customer delivery Experience\s+Quality",
+        flat,
+        re.IGNORECASE,
+    )
+
+    safety_labels = [
+        ("Safe Driving Metric (FICO)", "fico"),
+        ("Vehicle Audit (VSA) Compliance", "vehicleAuditCompliance"),
+        ("Speeding Event Rate (Per 100 Trips)", "speedingEventRatePer100Trips"),
+        ("Breach of Contract (BOC)", "breachOfContract"),
+        ("Mentor Adoption Rate", "mentorAdoptionRate"),
+        ("Working Hours Compliance (WHC)", "workingHoursCompliance"),
+        ("Comprehensive Audit Score (CAS)", "comprehensiveAuditScore"),
+    ]
+    delivery_labels = [
+        ("Customer escalation DPMO", "customerEscalationDpmo"),
+        ("Delivery Completion Rate(DCR)", "deliveryCompletionRate"),
+        ("Customer Delivery Feedback", "customerDeliveryFeedback"),
+        ("Delivered Not Received(DNR DPMO)", "dnrDpmo"),
+        ("Lost on Road (LoR) DPMO", "lorDpmo"),
+        ("Delivery Success Conditions (DSC DPMO)", "dscDpmo"),
+        ("Photo-On-Delivery", "photoOnDelivery"),
+        ("Contact Compliance", "contactCompliance"),
+    ]
+    safety_tokens = _extract_tokens_by_labels(
+        flat,
+        [label for label, _ in safety_labels] + ["Delivery Quality & SWC:"],
+    )
+    delivery_tokens = _extract_tokens_by_labels(
+        flat,
+        [
+            "Customer escalation DPMO",
+            "Delivery Completion Rate(DCR)",
+            "Customer Delivery Feedback",
+            "Delivered Not Received(DNR DPMO)",
+            "Lost on Road (LoR) DPMO",
+            "Standard Work Compliance",
+            "Delivery Success Conditions (DSC DPMO)",
+            "Photo-On-Delivery",
+            "Contact Compliance",
+            "Metrics highlighted in red",
+        ],
+    )
+
+    compliance_and_safety = {
+        "overallStatus": normalize_status_label(safety_overall.group(1)) if safety_overall else "",
+        "safety": {},
+        "compliance": {},
+    }
+    for label, key in safety_labels:
+        token = safety_tokens.get(label)
+        metric = _parse_metric_value(token)
+        if metric is None:
+            continue
+        if key in {"fico", "speedingEventRatePer100Trips", "mentorAdoptionRate"}:
+            compliance_and_safety["safety"][key] = metric
+        else:
+            compliance_and_safety["compliance"][key] = metric
+
+    if compliance_and_safety["overallStatus"] or compliance_and_safety["safety"] or compliance_and_safety["compliance"]:
+        result["complianceAndSafety"] = compliance_and_safety
+
+    delivery_quality_swc = {
+        "overallStatus": normalize_status_label(delivery_overall.group(1)) if delivery_overall else "",
+        "customerDeliveryExperience": {},
+        "quality": {},
+        "standardWorkCompliance": {},
+    }
+    for label, key in delivery_labels:
+        token = delivery_tokens.get(label)
+        metric = _parse_metric_value(token)
+        if metric is None:
+            continue
+        if key in {"customerEscalationDpmo", "customerDeliveryFeedback"}:
+            delivery_quality_swc["customerDeliveryExperience"][key] = metric
+        elif key in {"deliveryCompletionRate", "dnrDpmo", "lorDpmo"}:
+            delivery_quality_swc["quality"][key] = metric
+        else:
+            delivery_quality_swc["standardWorkCompliance"][key] = metric
+
+    if delivery_quality_swc["overallStatus"] or delivery_quality_swc["customerDeliveryExperience"] or delivery_quality_swc["quality"] or delivery_quality_swc["standardWorkCompliance"]:
+        result["deliveryQualitySwc"] = delivery_quality_swc
+
+    return result
 
 # ===============================
 # KPI FORMULAS (Albert’s rules)
@@ -546,6 +718,8 @@ def extract_summary(pdf: pdfplumber.PDF) -> Dict[str, Any]:
     if m := grab(r"(?:Rank\s+(?:in\s+Station|at\s+[A-Z0-9\-]+))\D*(\d+)\D*(?:of|/|von)\D*(\d+)", re.IGNORECASE):
         res["rankAtStation"] = int(m.group(1))
         res["stationCount"] = int(m.group(2))
+
+    res.update(_parse_scorecard_summary_sections(pdf))
 
     return res
 
