@@ -222,6 +222,30 @@ def _extract_tokens_by_labels(
         tokens[label] = clean_str(text[value_start:value_end])
     return tokens
 
+def _extract_section_overall_status(
+    text: str,
+    section_label: str,
+    stop_labels: List[str],
+) -> str:
+    lower_text = text.lower()
+    start = lower_text.find(section_label.lower())
+    if start < 0:
+        return ""
+
+    start += len(section_label)
+    end = len(text)
+    for stop_label in stop_labels:
+        idx = lower_text.find(stop_label.lower(), start)
+        if idx >= 0:
+            end = min(end, idx)
+
+    snippet = clean_str(text[start:end])
+    if not snippet:
+        return ""
+
+    match = re.search(r"\b(Fantastic Plus|Fantastic|Great|Fair|Poor)\b", snippet, re.IGNORECASE)
+    return normalize_status_label(match.group(1)) if match else ""
+
 def _parse_metric_value(token: Optional[str]) -> Optional[Dict[str, Any]]:
     s = clean_str(token)
     if not s:
@@ -256,15 +280,25 @@ def _parse_scorecard_summary_sections(pdf: pdfplumber.PDF) -> Dict[str, Any]:
     flat = clean_str(page_text)
     result: Dict[str, Any] = {}
 
-    safety_overall = re.search(
-        r"Compliance and Safety\s+([A-Za-z ]+?)\s+Safety\s+Compliance",
+    safety_overall = _extract_section_overall_status(
         flat,
-        re.IGNORECASE,
+        "Compliance and Safety",
+        [
+            "Safe Driving Metric (FICO)",
+            "Safety",
+            "Safety Compliance",
+            "Delivery Quality & SWC:",
+        ],
     )
-    delivery_overall = re.search(
-        r"Delivery Quality\s*&\s*SWC:\s*([A-Za-z ]+?)\s+Customer delivery Experience\s+Quality",
+    delivery_overall = _extract_section_overall_status(
         flat,
-        re.IGNORECASE,
+        "Delivery Quality & SWC:",
+        [
+            "Customer delivery Experience",
+            "Customer escalation DPMO",
+            "Quality",
+            "Metrics highlighted in red",
+        ],
     )
 
     safety_labels = [
@@ -307,7 +341,7 @@ def _parse_scorecard_summary_sections(pdf: pdfplumber.PDF) -> Dict[str, Any]:
     )
 
     compliance_and_safety = {
-        "overallStatus": normalize_status_label(safety_overall.group(1)) if safety_overall else "",
+        "overallStatus": safety_overall,
         "safety": {},
         "compliance": {},
     }
@@ -325,7 +359,7 @@ def _parse_scorecard_summary_sections(pdf: pdfplumber.PDF) -> Dict[str, Any]:
         result["complianceAndSafety"] = compliance_and_safety
 
     delivery_quality_swc = {
-        "overallStatus": normalize_status_label(delivery_overall.group(1)) if delivery_overall else "",
+        "overallStatus": delivery_overall,
         "customerDeliveryExperience": {},
         "quality": {},
         "standardWorkCompliance": {},
